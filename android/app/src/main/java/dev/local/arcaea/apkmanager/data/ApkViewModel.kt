@@ -48,6 +48,10 @@ data class UiState(
     val cache: CacheUsage = CacheUsage(),
     /** 非空时界面弹出「导出完成 / 清理缓存」对话框 */
     val exportCleanup: ExportCleanupPrompt? = null,
+    /** 已保存的包名预设 */
+    val packagePresets: List<String> = emptyList(),
+    /** 上次实际用过的包名，用于预填导出对话框 */
+    val lastPackageName: String? = null,
 )
 
 /**
@@ -58,6 +62,7 @@ data class UiState(
 class ApkViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = AppRepository(app)
+    private val presets = PackageNamePresets(app)
     private val mutex = Mutex()
     private val writeDispatcher = Dispatchers.IO.limitedParallelism(1)
     /** 签名密钥指纹只算一次 */
@@ -65,6 +70,14 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _state = MutableStateFlow(UiState(freeSpace = repo.freeSpaceBytes()))
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    init {
+        _state.value = _state.value.copy(
+            packagePresets = presets.all(),
+            lastPackageName = presets.lastUsed,
+            cache = repo.cacheUsage(),
+        )
+    }
 
     private fun version() = _state.value.version + 1
 
@@ -80,6 +93,8 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
         selfTestSummary: String? = _state.value.selfTestSummary,
         showSelfTest: Boolean = _state.value.showSelfTest,
         exportCleanup: ExportCleanupPrompt? = _state.value.exportCleanup,
+        packagePresets: List<String> = _state.value.packagePresets,
+        lastPackageName: String? = _state.value.lastPackageName,
     ) {
         _state.value = _state.value.copy(
             project = project,
@@ -95,6 +110,8 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
             selfTestSummary = selfTestSummary,
             showSelfTest = showSelfTest,
             exportCleanup = exportCleanup,
+            packagePresets = packagePresets,
+            lastPackageName = lastPackageName,
             freeSpace = repo.freeSpaceBytes(),
             cache = repo.cacheUsage(),
         )
@@ -133,6 +150,20 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
+    }
+
+    /* ------------------------------ 包名预设 ------------------------------ */
+
+    /** 保存一个包名预设（已存在则提到最前），下次导出可一键填入 */
+    fun savePackagePreset(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        publish(packagePresets = presets.add(trimmed), message = "已保存包名预设：$trimmed")
+    }
+
+    /** 删除一个包名预设 */
+    fun removePackagePreset(name: String) {
+        publish(packagePresets = presets.remove(name), message = "已删除包名预设：$name")
     }
 
     private fun formatMb(bytes: Long): String =
@@ -199,12 +230,14 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
                             publish(busy = true, stage = stage, progress = percent)
                         }
                         project.markExported()
+                        packageName?.let { presets.lastUsed = it }
                         publish(
                             busy = false,
                             stage = "",
                             progress = 100,
                             lastExport = formatMb(summary.sizeBytes),
                             lastExportWarnings = summary.signProblems,
+                            lastPackageName = presets.lastUsed,
                             message = if (summary.signProblems.isEmpty()) {
                                 "导出并签名成功"
                             } else {
@@ -406,6 +439,9 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(writeDispatcher) { block() }
             } catch (err: Throwable) {
                 publish(error = err.message ?: err.toString())
+            } finally {
+                // 必须复位：进度回调会把 busy 置为 true，若不复位全屏遮罩会一直挡住界面
+                publish(busy = false, stage = "", progress = 0)
             }
         }
     }

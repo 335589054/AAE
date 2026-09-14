@@ -2,24 +2,34 @@ package dev.local.arcaea.apkmanager.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.local.arcaea.apkmanager.core.ApkProject
 import dev.local.arcaea.apkmanager.data.ApkViewModel
@@ -45,15 +56,29 @@ fun ExportDialog(state: UiState, vm: ApkViewModel, onDismiss: () -> Unit) {
 
     var rename by remember { mutableStateOf(!project.packageNameOverride.isNullOrBlank()) }
     var packageName by remember {
-        mutableStateOf(project.packageNameOverride ?: defaultNewPackage(originalPackage))
+        mutableStateOf(
+            project.packageNameOverride
+                ?: state.lastPackageName?.takeIf { it.isNotBlank() }
+                ?: defaultNewPackage(originalPackage),
+        )
     }
     var rewrite by remember { mutableStateOf(project.rewriteIdentifiers) }
     var acknowledged by remember { mutableStateOf(false) }
+    var presetToDelete by remember { mutableStateOf<String?>(null) }
+
+    // 首次组合时若「新包名」仍为空，用上次实际用过的包名兜底；不覆盖用户已输入的内容。
+    LaunchedEffect(Unit) {
+        if (packageName.isBlank()) {
+            packageName = state.lastPackageName?.takeIf { it.isNotBlank() }
+                ?: defaultNewPackage(originalPackage)
+        }
+    }
 
     val warnings = state.snapshot?.warnings ?: emptyList()
     val pending = state.snapshot?.pending ?: emptyList()
     val trimmed = packageName.trim()
     val validPackage = ApkProject.isValidPackageName(trimmed)
+    val canSavePreset = !busy && validPackage && state.packagePresets.none { it == trimmed }
     val canExport = !busy && (!rename || validPackage) && (warnings.isEmpty() || acknowledged)
 
     val createDocument = rememberLauncherForActivityResult(
@@ -121,13 +146,27 @@ fun ExportDialog(state: UiState, vm: ApkViewModel, onDismiss: () -> Unit) {
             color = AppTextDim,
         )
         if (rename) {
-            AppTextField(
-                value = packageName,
-                onValueChange = { packageName = it },
-                label = "新的包名",
-                placeholder = "com.example.arcaea.mod",
-                enabled = !busy,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppTextField(
+                    value = packageName,
+                    onValueChange = { packageName = it },
+                    label = "新的包名",
+                    modifier = Modifier.weight(1f),
+                    placeholder = "com.example.arcaea.mod",
+                    enabled = !busy,
+                )
+                OutlinedButton(
+                    onClick = { vm.savePackagePreset(trimmed) },
+                    enabled = canSavePreset,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Text("保存为预设", style = MaterialTheme.typography.labelSmall)
+                }
+            }
             if (!validPackage) {
                 Text(
                     text = "包名不合法：至少两段、每段以字母开头，只能包含字母、数字与下划线。",
@@ -135,6 +174,12 @@ fun ExportDialog(state: UiState, vm: ApkViewModel, onDismiss: () -> Unit) {
                     color = AppRed,
                 )
             }
+            PackagePresetRow(
+                presets = state.packagePresets,
+                enabled = !busy,
+                onPick = { packageName = it },
+                onRequestDelete = { presetToDelete = it },
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = rewrite, onCheckedChange = { rewrite = it }, enabled = !busy)
                 Text(
@@ -215,6 +260,97 @@ fun ExportDialog(state: UiState, vm: ApkViewModel, onDismiss: () -> Unit) {
             style = MaterialTheme.typography.labelSmall,
             color = AppTextDim,
         )
+    }
+
+    presetToDelete?.let { name ->
+        ConfirmDialog(
+            title = "删除包名预设",
+            message = "删除包名预设「$name」？",
+            onConfirm = {
+                vm.removePackagePreset(name)
+                presetToDelete = null
+            },
+            onDismiss = { presetToDelete = null },
+            confirmText = "删除",
+            danger = true,
+        )
+    }
+}
+
+/** 「包名预设」一行：可横向滚动的 chip；没有预设时给出灰色提示。 */
+@Composable
+private fun PackagePresetRow(
+    presets: List<String>,
+    enabled: Boolean,
+    onPick: (String) -> Unit,
+    onRequestDelete: (String) -> Unit,
+) {
+    if (presets.isEmpty()) {
+        Text(
+            text = "还没有保存的预设：填好包名后点「保存为预设」即可。",
+            style = MaterialTheme.typography.labelSmall,
+            color = AppTextDim,
+        )
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("包名预设", style = MaterialTheme.typography.labelSmall, color = AppTextDim)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            presets.forEach { preset ->
+                PresetChip(
+                    name = preset,
+                    enabled = enabled,
+                    onPick = { onPick(preset) },
+                    onDelete = { onRequestDelete(preset) },
+                )
+            }
+        }
+    }
+}
+
+/** 单个预设 chip：点主体填入包名，点右侧 ✕ 触删除。 */
+@Composable
+private fun PresetChip(
+    name: String,
+    enabled: Boolean,
+    onPick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(enabled = enabled, onClick = onPick),
+        shape = RoundedCornerShape(8.dp),
+        color = AppPrimary.copy(alpha = 0.12f),
+        border = BorderStroke(1.dp, AppPrimary.copy(alpha = 0.45f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.labelSmall,
+                color = AppPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 220.dp),
+            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = enabled, onClick = onDelete)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+            ) {
+                Text("✕", style = MaterialTheme.typography.labelSmall, color = AppTextDim)
+            }
+        }
     }
 }
 

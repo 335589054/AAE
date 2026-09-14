@@ -23,6 +23,7 @@
 | 改包名 | 直接改写二进制 `AndroidManifest.xml` 的字符串池，可选同时改写自定义权限名 / Provider 授权名 |
 | 自检 | 调试构建启动时自动跑一次端到端自检（打包 → 签名 → 校验 → 重新解析），结果输出到 logcat（tag `AAM-SELFTEST`） |
 | **清除缓存** | 导出完成后弹出独立提示框，可选择删除「导入的源 APK / 缓存的导出 APK / 项目缓存数据」；「工程」页也有缓存占用明细与清理入口（详见第六节） |
+| **包名预设** | 可把常用的新包名保存为预设（持久化保存，最多 20 个）在导出时一键填入；并自动记住上次用过的包名用于预填 |
 
 ## 二、构建
 
@@ -74,13 +75,16 @@ cd android
 未改动资源逐字节一致校验。自检用的是一份 **7KB 的合成 APK**
 （`app/src/main/assets/selftest.apk`，含真实的二进制 AndroidManifest.xml）。
 
-在手机上验证签名能力（会额外验证 apksig 在 Android 上可用）：
+在手机上验证（会额外验证 apksig 在 Android **运行时**的可用性）：
 
 ```powershell
 adb -s <serial> install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb -s <serial> shell am start -n dev.local.arcaea.apkmanager/.MainActivity
 adb -s <serial> logcat -d -s AAM-SELFTEST
 ```
+
+> ✅ 已在真机验证通过：安装 debug 包并启动后，自检输出 `AAM-SELFTEST: PASS (46/46)`，
+> 说明应用内的 **v1 + v2 + v3 签名 + `ApkVerifier` 校验**在 Android 上工作正常。
 
 ## 四、代码结构
 
