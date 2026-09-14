@@ -185,6 +185,68 @@ object SelfTest {
                 project.removeSong("renamed3")
                 check("清理新增的测试歌曲", project.songs.size == 2, project.songs.size.toString())
 
+                // ===== songdata.json 模板：自动填充字段 + 自动添加难度 =====
+                val songdata = ResourceZip.parseSongFragment(
+                    """
+                    {
+                      "id": "ignored",
+                      "title_localized": { "en": "Everything B.K." },
+                      "artist": "nora2r",
+                      "bpm": "180",
+                      "bpm_base": 180,
+                      "set": "ignored",
+                      "audioPreview": 71278,
+                      "audioPreviewEnd": 93944,
+                      "side": 1,
+                      "bg": "single2_conflict",
+                      "date": 1782789460,
+                      "version": "",
+                      "difficulties": [
+                        { "ratingClass": 0, "chartDesigner": "", "jacketDesigner": "", "rating": 0 },
+                        { "ratingClass": 1, "chartDesigner": "", "jacketDesigner": "", "rating": 0 },
+                        { "ratingClass": 2, "chartDesigner": "Everything B.P.C.", "jacketDesigner": "", "rating": 10 }
+                      ]
+                    }
+                    """.trimIndent().toByteArray(),
+                )
+                check("songdata.json 能被解析出歌曲对象", songdata != null)
+                val songdataSong = Song.template("selftest4", "base", "临时曲名")
+                project.addSongWithResources(songdataSong, SongResourceBundle(emptyList(), songdata))
+                val fromSongdata = project.song("selftest4")
+                check(
+                    "songdata 填充了曲名",
+                    fromSongdata?.title() == "Everything B.K.",
+                    fromSongdata?.title().orEmpty(),
+                )
+                check(
+                    "songdata 填充了曲师与 BPM",
+                    fromSongdata?.artist == "nora2r" && fromSongdata?.bpm == "180",
+                    "${fromSongdata?.artist}/${fromSongdata?.bpm}",
+                )
+                check(
+                    "songdata 自动添加了 3 个难度",
+                    fromSongdata?.difficultyList()?.size == 3,
+                    fromSongdata?.difficultyList()?.size?.toString().orEmpty(),
+                )
+                check(
+                    "难度定数与曲师被写入",
+                    fromSongdata?.difficulty(2)?.let {
+                        Song.difficultyRating(it) == 10 && it.optString("chartDesigner") == "Everything B.P.C."
+                    } == true,
+                )
+                check(
+                    "难度 0/1 也被添加（定数 0）",
+                    fromSongdata?.difficulty(0)?.let { Song.difficultyRating(it) } == 0 &&
+                        fromSongdata?.difficulty(1) != null,
+                )
+                check(
+                    "songdata 里的 id 与曲包不生效（仍以填写值为准）",
+                    fromSongdata?.id == "selftest4" && fromSongdata?.set == "base",
+                    "${fromSongdata?.id}/${fromSongdata?.set}",
+                )
+                project.removeSong("selftest4")
+                check("清理 songdata 测试歌曲", project.songs.size == 2, project.songs.size.toString())
+
                 // 改动摘要
                 val pending = project.snapshot().pending
                 check("改动摘要包含 songlist", pending.any { it.contains("songlist") })
@@ -257,6 +319,29 @@ object SelfTest {
                     if (data == null) broken++ else readable++
                 }
                 check("产物所有条目可解压", broken == 0, "可读 $readable / 异常 $broken")
+            }
+            true to ""
+        }
+
+        runCatchingCheck("暂存资源丢失时给出可读错误（回归：ENOENT）") {
+            val tempProject = ApkProject(File(workDir, "selftest-input.apk"))
+            try {
+                // 模拟以前的 bug：重新导入资源包 / 清理缓存导致暂存的临时文件被删掉
+                val gone = File(workDir, "staged-then-gone.bin").apply { writeBytes(ByteArray(16)) }
+                tempProject.stageWriteFile("assets/songs/selftest1/extra.bin", gone)
+                gone.delete()
+                val err = runCatching {
+                    tempProject.exportUnsigned(File(workDir, "should-not-exist.apk"))
+                }.exceptionOrNull()
+                check(
+                    "临时文件丢失时报出可读错误而不是 ENOENT",
+                    err is java.io.IOException &&
+                        err.message?.contains("已丢失") == true &&
+                        err.message?.contains("extra.bin") == true,
+                    err?.message?.take(100).orEmpty(),
+                )
+            } finally {
+                tempProject.close()
             }
             true to ""
         }

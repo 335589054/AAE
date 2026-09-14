@@ -316,7 +316,7 @@ private fun NewSongDialog(
             )
         }
         Text(
-            text = "选择后会把包内文件自动解压到 assets/songs/<id>/（支持根目录 / <歌曲目录>/… / assets/songs/<id>/… 三种结构），并尝试用包内的 songlist / slst 片段填充字段；id 与曲包始终以这里填写的为准。",
+            text = "选择后会把包内文件自动解压到 assets/songs/<id>/（支持根目录 / <歌曲目录>/… / assets/songs/<id>/… 三种结构），并自动用包内的 songdata.json / songlist / slst 填充曲名、曲师、BPM 等字段与难度列表；id 与曲包始终以这里填写的为准。",
             style = MaterialTheme.typography.labelSmall,
             color = AppTextDim,
         )

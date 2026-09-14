@@ -23,7 +23,22 @@ data class SongResourceBundle(
 object ResourceZip {
 
     /** 单曲元数据片段的文件名（不带扩展名判断大小写） */
-    private val METADATA_NAMES = setOf("songlist", "songlist.txt", "slst", "song.json")
+    private val METADATA_NAMES = setOf(
+        "songlist",
+        "songlist.txt",
+        "slst",
+        "song.json",
+        // 资源包里常见的单曲数据文件（结构与 songlist 的单曲条目一致）
+        "songdata.json",
+        "songdata",
+    )
+
+    /**
+     * 写入歌曲目录的文件名必须安全：非空、不以点开头、不含路径分隔符。
+     * 注意要在**切分之后**判断，否则 `X/.outside` 这类条目会漏过。
+     */
+    fun isSafeFileName(name: String): Boolean =
+        name.isNotEmpty() && !name.startsWith(".") && !name.contains('/') && !name.contains('\\')
 
     /** 判断某个 zip 条目是否为单曲元数据片段 */
     fun isMetadataName(rawName: String): Boolean {
@@ -45,22 +60,21 @@ object ResourceZip {
         if (isMetadataName(name)) return null // 元数据片段由调用方单独处理，不写入歌曲目录
 
         val songsIdx = name.indexOf("assets/songs/")
-        if (songsIdx >= 0) {
+        val candidate = if (songsIdx >= 0) {
             val rest = name.substring(songsIdx + "assets/songs/".length)
             val slash = rest.indexOf('/')
-            if (slash < 0) return null // 这一层是 songlist / packlist 之类的整包元数据，不写入单曲目录
-            if (rest.startsWith("pack/")) return null
-            val inner = rest.substring(slash + 1)
-            return if (inner.isEmpty() || inner.contains('/')) null else inner
+            // 这一层是 songlist / packlist 之类的整包元数据，不写入单曲目录
+            if (slash < 0 || rest.startsWith("pack/")) return null
+            rest.substring(slash + 1)
+        } else {
+            val parts = name.split('/').filter { it.isNotEmpty() }
+            when (parts.size) {
+                1 -> parts[0]   // 根目录直接放文件
+                2 -> parts[1]   // <歌曲目录>/文件
+                else -> return null // 层级过深，忽略（避免误吞嵌套目录）
+            }
         }
-
-        val parts = name.split('/').filter { it.isNotEmpty() }
-        return when {
-            parts.isEmpty() -> null
-            parts.size == 1 -> parts[0]                       // 根目录直接放文件
-            parts.size == 2 -> parts[1]                       // <歌曲目录>/文件
-            else -> null                                      // 层级过深，忽略（避免误吞嵌套目录）
-        }
+        return candidate.takeIf { isSafeFileName(it) }
     }
 
     /** 从元数据片段里取出第一个歌曲对象；兼容 {"songs":[…]} / {"song":{…}} / 裸对象 */
@@ -93,5 +107,13 @@ object ResourceZip {
         }
         target.id = keepId
         target.set = keepSet
+
+        // 难度条目会整体来自 songdata.json（即「自动添加难度」），
+        // 但有些文件只写了 ratingClass / rating，这里补齐其余字段，保证结构完整可导。
+        for (difficulty in target.difficultyList()) {
+            if (difficulty["chartDesigner"] == null) difficulty.put("chartDesigner", JsonString(""))
+            if (difficulty["jacketDesigner"] == null) difficulty.put("jacketDesigner", JsonString(""))
+            if (difficulty["rating"] == null) difficulty.put("rating", JsonNumber.of(0))
+        }
     }
 }

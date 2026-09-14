@@ -57,6 +57,9 @@ class AppRepository(private val context: Context) {
     /** 上次导出后保留在缓存里的产物；由「清除缓存」释放 */
     val cachedExportApk: File get() = File(workDir, "last-export.apk")
 
+    /** 解压目录的唯一序号，避免同一毫秒内多次导入撞名 */
+    private var zipSequence = 0
+
     fun assetBytes(name: String): ByteArray = context.assets.open(name).use { it.readBytes() }
 
     /** 内置的自动签名密钥 */
@@ -165,10 +168,10 @@ class AppRepository(private val context: Context) {
      * 同时尝试解析包内的单曲元数据片段（songlist / slst / songlist.txt / song.json）。
      */
     fun extractResourceZip(uri: Uri, onProgress: (String, Int) -> Unit = { _, _ -> }): SongResourceBundle {
-        val outDir = File(importDir, "zip").apply {
-            deleteRecursively()
-            mkdirs()
-        }
+        // 每次都用一个全新的子目录：以前复用同一个目录并在开头 deleteRecursively()，
+        // 导致「第二次导入资源包」会把第一次导入、尚未导出（仅暂存）的临时文件删掉，
+        // 最终导出时报 ENOENT。这里改成唯一目录，之前的暂存文件不再受影响。
+        val outDir = File(importDir, "zip-${System.currentTimeMillis()}-${zipSequence++}").apply { mkdirs() }
         val files = LinkedHashMap<String, File>()
         var metadata: JsonObject? = null
         context.contentResolver.openInputStream(uri)?.use { input ->

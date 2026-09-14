@@ -300,7 +300,8 @@ class ApkProject(val apkFile: File) : Closeable {
         val oldPrefix = songPrefix(oldId)
         val newPrefix = songPrefix(trimmed)
         if (files.isNotEmpty()) {
-            val stageDir = File(tempDir, "rename-${oldId}").apply {
+            // 目录名带唯一后缀：重复给不同歌曲改 id（且复用同一个旧 id）时不会互相删掉临时文件
+            val stageDir = File(tempDir, "rename-${oldId}-${System.nanoTime()}").apply {
                 deleteRecursively()
                 mkdirs()
             }
@@ -485,6 +486,18 @@ class ApkProject(val apkFile: File) : Closeable {
      * 完成后再交给 [Signer] 签名。
      */
     fun exportUnsigned(outFile: File, onProgress: (String, Int) -> Unit = { _, _ -> }) {
+        // 先确认所有「来自文件」的暂存资源都还在：临时文件可能因为重新导入资源包、
+        // 清理缓存等原因被删掉，提前报出可读的错误，而不是在中途抛出 ENOENT。
+        val missing = writes.filterValues { it is WriteOp.FromFile && !it.file.exists() }.keys.toList()
+        if (missing.isNotEmpty()) {
+            throw IOException(
+                "以下已导入的临时资源文件已丢失，无法完成导出：" +
+                    missing.take(5).joinToString("", prefix = "\n  ") { it } +
+                    (if (missing.size > 5) "\n  …共 ${missing.size} 个" else "") +
+                    "\n请重新导入这些资源后再试（通常发生在重新导入过资源包、或清理过缓存之后）。",
+            )
+        }
+
         val overrides = LinkedHashMap<String, WriteOp>()
 
         onProgress("正在序列化 songlist / packlist…", 1)
