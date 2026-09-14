@@ -34,6 +34,41 @@ object ResourceZip {
     )
 
     /**
+     * 单曲目录里允许出现的资源扩展名。
+     * 只接受这些类型，可以避免把压缩包里的无关文件（如 AndroidManifest.xml、classes.dex、
+     * META-INF 下的 .version 等）写进歌曲目录。
+     */
+    private val RESOURCE_EXTENSIONS = setOf(
+        "aff", "ogg", "opus", "mp3", "wav", "m4a", "aac", "flac",
+        "jpg", "jpeg", "png", "webp", "bmp",
+    )
+
+    /** 是否是单曲资源文件（按扩展名判断） */
+    fun isResourceFileName(name: String): Boolean {
+        val dot = name.lastIndexOf('.')
+        if (dot <= 0 || dot == name.length - 1) return false
+        return name.substring(dot + 1).lowercase() in RESOURCE_EXTENSIONS
+    }
+
+    /**
+     * 该条目是否是「一个完整 APK」的特征文件。
+     * 常见误用是把整个 APK 改名成 .zip 再当作单曲资源包导入，这里用于及早给出明确报错。
+     */
+    fun isApkMarkerEntry(rawName: String): Boolean {
+        val name = rawName.replace('\\', '/')
+        val base = name.substringAfterLast('/')
+        if (base == "AndroidManifest.xml") return true
+        if (base == "resources.arsc") return true
+        if (Regex("^classes\\d*\\.dex$").matches(base)) return true
+        if (name.startsWith("META-INF/") &&
+            Regex("\\.(RSA|SF|DSA|EC)$", RegexOption.IGNORE_CASE).containsMatchIn(base)
+        ) {
+            return true
+        }
+        return false
+    }
+
+    /**
      * 写入歌曲目录的文件名必须安全：非空、不以点开头、不含路径分隔符。
      * 注意要在**切分之后**判断，否则 `X/.outside` 这类条目会漏过。
      */
@@ -74,7 +109,7 @@ object ResourceZip {
                 else -> return null // 层级过深，忽略（避免误吞嵌套目录）
             }
         }
-        return candidate.takeIf { isSafeFileName(it) }
+        return candidate.takeIf { isSafeFileName(it) && isResourceFileName(it) }
     }
 
     /** 从元数据片段里取出第一个歌曲对象；兼容 {"songs":[…]} / {"song":{…}} / 裸对象 */

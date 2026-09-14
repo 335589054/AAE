@@ -229,8 +229,15 @@ private fun NewSongDialog(
 
     val pickZip = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
+            val name = displayName(context, uri)
             zipUri = uri
-            zipName = displayName(context, uri)
+            zipName = name
+            if (name != null) {
+                // 用文件名自动填标题（去掉扩展名），用户之后仍可手动修改。
+                title = stripZipExtension(name)
+                // id 仍为空时，用文件名推导一个合法的初始 id。
+                if (id.isBlank()) id = toSongId(name)
+            }
         }
     }
 
@@ -250,7 +257,7 @@ private fun NewSongDialog(
     ) {
         AppTextField(
             value = id,
-            onValueChange = { id = it },
+            onValueChange = { id = formatSongId(it) },
             label = "歌曲 id（需与目录 assets/songs/<id>/ 一致）",
             placeholder = "mysong01",
         )
@@ -332,6 +339,18 @@ private fun NewSongDialog(
         )
     }
 }
+
+/** 去掉 zip 文件名的扩展名；文件名本身没有点时原样返回。 */
+private fun stripZipExtension(name: String): String =
+    name.substringBeforeLast('.').ifBlank { name }
+
+/** 歌曲 id 实时格式化：全小写并删除所有空白字符。 */
+private fun formatSongId(raw: String): String = raw.lowercase().filterNot { it.isWhitespace() }
+
+/** 用 zip 文件名推导初始 id：去扩展名 → 格式化 → 只保留字母 / 数字 / _ - .。 */
+private fun toSongId(name: String): String =
+    formatSongId(stripZipExtension(name))
+        .filter { it.isLetterOrDigit() || it == '_' || it == '-' || it == '.' }
 
 /** 读取 content Uri 的显示文件名（查询失败时退回路径末段）。 */
 private fun displayName(context: Context, uri: Uri): String? {

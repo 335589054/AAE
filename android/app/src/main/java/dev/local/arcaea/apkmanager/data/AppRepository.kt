@@ -185,6 +185,15 @@ class AppRepository(private val context: Context) {
                     }
                     val raw = entry.name
 
+                    // 及早识别「把整个 APK 改名成 zip」这种误用，避免把无关文件写进歌曲目录
+                    if (ResourceZip.isApkMarkerEntry(raw)) {
+                        throw IOException(
+                            "这个压缩包看起来是一个完整的 APK（检测到 $raw），不是单曲资源包。\n" +
+                                "请改为：只把该歌曲的资源文件（谱面 .aff、音频 .ogg、封面 .jpg/png，可含 songdata.json）" +
+                                "打成一个压缩包；若要修改整个安装包，请到「工程」页导入 APK。",
+                        )
+                    }
+
                     if (ResourceZip.isMetadataName(raw)) {
                         val fragment = ResourceZip.parseSongFragment(zip.readBytes())
                         if (fragment != null && metadata == null) {

@@ -29,3 +29,6 @@ android/captures/
 
 # 说明：android/keystore/release.p12 与 android/app/src/main/assets/auto-sign.p12
 # 必须随仓库提交——签名密钥要保持固定，否则已安装的包无法覆盖更新，因此不在此忽略。
+
+# 参考用的单曲数据模板（格式已在 android 自检里以等价样例固化）
+android/songdata..json
