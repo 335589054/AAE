@@ -17,7 +17,7 @@ Arcaea Apk Manager/
 │  ├─ shared/         与渲染进程共用的类型
 │  ├─ src/            React 界面
 │  ├─ scripts/        selftest.ts（端到端自检）、diff-apk-resources.mjs（资源对账）
-│  └─ Sample/         参考 APK 解包内容（仅用于分析与自检）
+│  └─ Sample/         参考 APK 解包内容（**未随仓库提供**，见下方说明）
 ├─ android/           Android 版（Kotlin/Compose，详见 android/README.md）
 │  └─ app/src/main/java/dev/local/arcaea/apkmanager/
 │     ├─ core/        纯 JVM 核心：Zip / Axml / Json / Model / Project / Signer / SelfTest
@@ -25,6 +25,11 @@ Arcaea Apk Manager/
 │     └─ ui/          Compose 界面
 └─ AGENTS.md
 ```
+
+> `windows/Sample/` 是解包出来的 Arcaea 安装包内容（700MB+，含游戏版权资源），**不随仓库提供**。
+> 需要跑 Windows 版自检时，请把你**合法拥有**的安装包解包后放到 `windows/Sample/` 即可。
+> 两端各自带有端到端自检（打包 → 签名 → 校验 → 重新解析产物），Windows 版也支持把
+> `Sample/` 换成你自己的 APK 解包内容。同理，`node_modules/` 与构建产物也未提交。
 
 ## 快速开始
 
