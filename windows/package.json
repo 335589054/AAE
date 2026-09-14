@@ -1,0 +1,57 @@
+{
+  "name": "arcaea-apk-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows 端 Arcaea 安装包修改器：编辑歌曲/谱面/曲包，重新打包、自动签名并通过 adb 无线调试安装。",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "build:main": "node scripts/build-main.mjs",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "dev": "npm run build:main && concurrently -k -n vite,electron \"vite\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit",
+    "selftest": "esbuild scripts/selftest.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.cjs --outfile=.selftest.cjs && node .selftest.cjs",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "dev.local.arcaea.apkmanager",
+    "productName": "Arcaea Apk Manager",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "!Sample/**/*",
+      "!tools/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "wait-on": "^9.1.0"
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}

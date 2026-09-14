@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-electron/
+release/
+tools/
+cache/
+*.log
+.selftest.cjs
+.DS_Store
