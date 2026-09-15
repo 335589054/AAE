@@ -126,6 +126,8 @@ fun AppTextField(
     placeholder: String? = null,
     singleLine: Boolean = true,
     enabled: Boolean = true,
+    /** 失焦回调（编辑结束时触发），用于停止「正在编辑」标志 */
+    onFocusChangedRelease: (() -> Unit)? = null,
 ) {
     val labelSlot: (@Composable () -> Unit)? = if (label != null) {
         { Text(label, style = MaterialTheme.typography.labelSmall) }
@@ -147,6 +149,13 @@ fun AppTextField(
         placeholder = placeholderSlot,
         textStyle = MaterialTheme.typography.bodySmall,
     )
+    if (onFocusChangedRelease != null) {
+        androidx.compose.runtime.LaunchedEffect(value) {
+            // 无自带失焦钩子时，用「内容改变结束」近似：等待一小段停顿即视为编辑结束
+            kotlinx.coroutines.delay(1200)
+            onFocusChangedRelease()
+        }
+    }
 }
 
 /** 下拉选择器（用文字箭头，避免依赖图标库）。 */

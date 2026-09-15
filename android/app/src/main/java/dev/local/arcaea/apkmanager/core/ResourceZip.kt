@@ -8,9 +8,91 @@ data class SongResourceBundle(
     val files: List<Pair<String, File>>,
     /** 压缩包里带的 songlist / slst / songlist.txt / song.json 片段（可能为空） */
     val metadata: JsonObject?,
+    /**
+     * 包内没有 songdata 时，从主难度谱面（2.aff→3.aff→4.aff）识别出的 BPM。
+     * 有 songdata 时为 null（以 songdata 为准）。用于填充 bpm / bpm_base。
+     */
+    val bpm: SongBpmInfo? = null,
+    /** 导入过程中发现的提示（例如某个谱面文件是空谱面，物量为 0） */
+    val warnings: List<String> = emptyList(),
 ) {
     val isEmpty: Boolean get() = files.isEmpty() && metadata == null
 }
+
+/**
+ * 判断一段 Arcaea 谱面文本是否「空谱面」（没有任何音符/物件，游戏里物量为 0）。
+ *
+ * 策略：先剔除所有 `timing(...)`（计时语句里也含 `(` `)`，不能当作音符证据），
+ * 再检查剩余文本里是否有任何「物件命令」：arc / hold / flick / count，
+ * 或地面 note `(tick, lane);`。
+ *
+ * 注意不依赖「行首」正则：真实谱面可能用 CR-only 换行、把多个 note 写在同一行，
+ * 或带缩进——这些都必须是有效的非空谱面。
+ */
+fun isChartEmpty(affText: String): Boolean {
+    if (affText.isBlank()) return true
+    // 去掉所有 timing(...) 调用（含可选结尾分号），它们不是音符
+    val nonTiming = affText.replace(Regex("timing\\s*\\([^)]*\\)\\s*;?"), "")
+    // 弧线 / 长条 / 微调 / 分离 tap：arc(...) / hold(...) / flick(...) / count(...)
+    val hasNoteCommand = Regex("\\b(?:arc|hold|flick|count)\\s*\\(").containsMatchIn(nonTiming)
+    // 地面 note：(tick, lane); —— 不限制行首，兼容同行情景与 CR 换行
+    val hasGroundNote = Regex("\\(\\s*-?\\d+\\s*,\\s*-?\\d+\\s*\\)\\s*;").containsMatchIn(nonTiming)
+    return !hasNoteCommand && !hasGroundNote
+}
+
+/** 从谱面文本解析出来的 BPM 信息 */
+data class SongBpmInfo(
+    /** BPM 显示值：单数值，或「最小值-最大值」的范围 */
+    val range: String,
+    /** 谱面中占时最长（主导）的 BPM */
+    val base: Double,
+)
+
+/**
+ * 解析 Arcaea 谱面文本中的 BPM。
+ * - range：读取所有 `timing(...)` 的 BPM（含区间渐变的端点），跨度为 min-max；
+ * - base：按相邻 timing 的起始位置差近似「占时」，取累计占时最长的 BPM。
+ */
+fun parseSongBpm(affText: String): SongBpmInfo? {
+    data class Seg(val start: Double, val bpm: Double)
+    val segs = ArrayList<Seg>()
+    val timingRe = Regex("timing\\s*\\(([^)]*)\\)")
+    timingRe.findAll(affText).forEach { m ->
+        val parts = m.groupValues[1].split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        // timing 以三元组堆叠：(tick, bpm, divisor) [，(tick2, bpm2, divisor2) …]
+        var i = 0
+        while (i + 2 < parts.size) {
+            val tick = parts[i].toDoubleOrNull() ?: break
+            val bpm = parts[i + 1].toDoubleOrNull()
+            i += 3
+            if (bpm != null) segs.add(Seg(tick, bpm))
+        }
+    }
+    if (segs.isEmpty()) return null
+
+    val bs = segs.map { it.bpm }.distinct().sorted()
+    val range = if (bs.size <= 1) { fmtBpm(bs.first()) } else { "${fmtBpm(bs.first())}-${fmtBpm(bs.last())}" }
+
+    // 占时：相邻 timing 的 start 差；末尾段不给时长（无后续起点则无法估算）
+    val ordered = segs.sortedBy { it.start }
+    val durationByBpm = mutableMapOf<Double, Double>()
+    for (i in ordered.indices) {
+        if (i >= ordered.lastIndex) break
+        val dur = ordered[i + 1].start - ordered[i].start
+        durationByBpm[ordered[i].bpm] = (durationByBpm[ordered[i].bpm] ?: 0.0) + dur
+    }
+    val base = if (durationByBpm.isEmpty()) {
+        segs.maxByOrNull { it.start }?.bpm ?: bs.first()
+    } else {
+        durationByBpm.maxByOrNull { it.value }?.key
+            ?: bs.first()
+    }
+    return SongBpmInfo(range, base)
+}
+
+/** BPM 数字格式化：去掉多余的尾 0，保留最多两位小数 */
+private fun fmtBpm(v: Double): String =
+    if (v == Math.floor(v) && !v.isInfinite()) v.toLong().toString() else String.format("%.2f", v).trimEnd('0').trimEnd('.')
 
 /**
  * 资源压缩包（zip）的解析规则，与 Windows 版保持一致。
@@ -80,7 +162,12 @@ object ResourceZip {
         val name = rawName.replace('\\', '/').trim()
         if (name.isEmpty() || name.endsWith("/")) return false
         if (name.contains("assets/songs/pack/")) return false
-        return name.substringAfterLast('/').lowercase() in METADATA_NAMES
+        val base = name.substringAfterLast('/').lowercase()
+        if (base in METADATA_NAMES) return true
+        // 兼容 songdata.json 的常见变体命名（如 songdata..json / songdata_v2.json / songdata_payload.json），
+        // 否则这些文件会被当成普通文件、既读不到也不会写入歌曲目录。仅当以 songdata 开头且以 .json 结尾才匹配。
+        if (base.startsWith("songdata") && base.endsWith(".json")) return true
+        return false
     }
 
     /**

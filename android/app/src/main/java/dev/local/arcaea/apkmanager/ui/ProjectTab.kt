@@ -36,6 +36,7 @@ fun ProjectTab(state: UiState, vm: ApkViewModel, modifier: Modifier = Modifier) 
     }
     var confirmClose by remember { mutableStateOf(false) }
     var showCache by remember { mutableStateOf(false) }
+    var confirmWipe by remember { mutableStateOf(false) }
     val project = state.project
 
     Column(
@@ -54,7 +55,7 @@ fun ProjectTab(state: UiState, vm: ApkViewModel, modifier: Modifier = Modifier) 
                 ) {
                     Text("未导入安装包", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "请选择你要修改的 Arcaea 安装包（.apk）",
+                        text = "请导入「壳子」资源包（.apk），而非官方安装包——官方安装包的 songlist 等已加密，无法解析。",
                         style = MaterialTheme.typography.bodySmall,
                         color = AppTextDim,
                         textAlign = TextAlign.Center,
@@ -203,8 +204,20 @@ fun ProjectTab(state: UiState, vm: ApkViewModel, modifier: Modifier = Modifier) 
                 OutlinedButton(
                     onClick = { showCache = true },
                     enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("清除缓存")
+                }
+                OutlinedButton(
+                    onClick = { confirmWipe = true },
+                    enabled = !state.busy,
+                    // 红色描边，示意这是更彻底的操作
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                        contentColor = AppRed,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("清空全部数据")
                 }
             }
         }
@@ -236,6 +249,22 @@ fun ProjectTab(state: UiState, vm: ApkViewModel, modifier: Modifier = Modifier) 
                 showCache = false
                 vm.clearCache(s, c, p)
             },
+        )
+    }
+
+    if (confirmWipe) {
+        ConfirmDialog(
+            title = "清空全部数据",
+            message = "将关闭当前工程，并删除本应用的全部数据（导入的安装包副本 / 打包中间产物 / " +
+                "暂存资源 / 自检文件 / 应用与外部缓存）。尚未导出的修改会全部丢失，" +
+                "已导出的 APK 不受影响。确定继续吗？",
+            confirmText = "确定清空",
+            danger = true,
+            onConfirm = {
+                confirmWipe = false
+                vm.wipeAllData()
+            },
+            onDismiss = { confirmWipe = false },
         )
     }
 }

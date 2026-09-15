@@ -55,13 +55,13 @@ class Song(val json: JsonObject) {
     var bg: String?
         get() = json.optText("bg")
         set(value) {
-            json.put("bg", value?.let { JsonString(it) } ?: JsonNull)
+            json.put("bg", JsonString(value ?: ""))
         }
 
     var bpm: String?
         get() = json.optText("bpm")
         set(value) {
-            json.put("bpm", value?.let { JsonString(it) } ?: JsonNull)
+            json.put("bpm", JsonString(value ?: ""))
         }
 
     var bpmBase: Double?
@@ -85,19 +85,21 @@ class Song(val json: JsonObject) {
     var version: String?
         get() = json.optText("version")
         set(value) {
-            json.put("version", value?.let { JsonString(it) } ?: JsonNull)
+            // 注意：绝不能写成 JsonNull。Arcaea 原生把 version 解析成 std::string，
+            // 显式 null 会在 basic_string::assign 处空指针崩溃（打开即闪退 SIGABRT）。
+            json.put("version", JsonString(value ?: ""))
         }
 
     var purchase: String?
         get() = json.optText("purchase")
         set(value) {
-            json.put("purchase", value?.let { JsonString(it) } ?: JsonNull)
+            json.put("purchase", JsonString(value ?: ""))
         }
 
     var artist: String?
         get() = json.optText("artist")
         set(value) {
-            json.put("artist", value?.let { JsonString(it) } ?: JsonNull)
+            json.put("artist", JsonString(value ?: ""))
         }
 
     var audioPreview: Long?

@@ -6,11 +6,23 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.local.arcaea.apkmanager.core.ApkProject
 import dev.local.arcaea.apkmanager.core.BuildOptions
+import dev.local.arcaea.apkmanager.core.AffTransform
+import dev.local.arcaea.apkmanager.core.SongBpmInfo
+import dev.local.arcaea.apkmanager.core.SongZip
+import dev.local.arcaea.apkmanager.core.JsonArray
+import dev.local.arcaea.apkmanager.core.JsonNumber
+import dev.local.arcaea.apkmanager.core.JsonObject
+import dev.local.arcaea.apkmanager.core.JsonString
 import dev.local.arcaea.apkmanager.core.Pack
 import dev.local.arcaea.apkmanager.core.ProjectSnapshot
 import dev.local.arcaea.apkmanager.core.SelfTest
 import dev.local.arcaea.apkmanager.core.Signer
 import dev.local.arcaea.apkmanager.core.Song
+import dev.local.arcaea.apkmanager.core.bufferStartWithBar
+import dev.local.arcaea.apkmanager.core.chartEndMs
+import dev.local.arcaea.apkmanager.audio.Ffmpeg
+import java.io.File
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +39,25 @@ data class ExportCleanupPrompt(
     val usage: CacheUsage,
     /** 是否还有未导出的改动（有的话不允许清理项目缓存数据） */
     val hasPendingChanges: Boolean,
+)
+
+/** 练习谱生成请求参数（由 PracticeDialog 收集后交给 [ApkViewModel.generatePractice]） */
+data class PracticeRequest(
+    val songId: String,
+    /** 要处理的难度 ratingClass 列表（0..4） */
+    val rcs: List<Int>,
+    /** 切割起始（毫秒，用户选择的区间起点，内部会再前移 1 小节做缓冲） */
+    val startMs: Long,
+    /** 切割结束（毫秒） */
+    val endMs: Long,
+    /** 变速倍速（<1 慢放、>1 快放） */
+    val speed: Double,
+    /** 复制新曲时的目标目录 id；原地修改时忽略 */
+    val newId: String? = null,
+    /** 复制新曲时的显示名（可为空，默认沿用源曲名） */
+    val newTitle: String? = null,
+    /** true=原地覆盖原谱面/音频；false=新建一首歌 */
+    val overwriteInPlace: Boolean = false,
 )
 
 /** 界面状态。project 内部是可变的，界面请以 [version] 作为「需要重新读取」的信号。 */
@@ -218,6 +249,30 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 一键清空应用全部数据（工作目录 + 应用/外部缓存），并关闭当前工程。
+     * 供「清空全部数据」按钮使用，用于彻底释放存储空间。
+     */
+    fun wipeAllData() {
+        viewModelScope.launch(writeDispatcher) {
+            mutex.withLock {
+                _state.value.project?.close()
+                repo.clearAllData()
+                publish(project = null, message = null, error = null, lastExport = null, lastExportWarnings = emptyList())
+                publish(message = "已清空应用全部数据")
+            }
+        }
+    }
+
+    /**
+     * 轻量读取资源压缩包里的曲目元数据（songdata.json / songlist / slst …），
+     * 选择 zip 后立刻返回给界面做即时反馈（不落地文件）。
+     */
+    fun readResourceZipMetadata(uri: Uri): JsonObject? = repo.readResourceMetadata(uri)
+
+    /** 从压缩包主难度谱面识别 BPM（2.aff→3.aff→4.aff），无 songdata 时用于填充 BPM。 */
+    fun readResourceBpmFromZip(uri: Uri): SongBpmInfo? = repo.readResourceBpmFromZip(uri)
+
     fun exportTo(uri: Uri, packageName: String?, rewriteIdentifiers: Boolean) {
         val project = _state.value.project ?: return
         if (_state.value.busy) return
@@ -284,7 +339,8 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
                 for ((name, file) in bundle.files) {
                     project.stageWriteFile("${ApkProject.SONGS_ROOT}$songId/$name", file)
                 }
-                publish(message = "已从压缩包导入 ${bundle.files.size} 个文件到 $songId")
+                val warn = if (bundle.warnings.isEmpty()) "" else "\n\n" + bundle.warnings.joinToString("\n")
+                publish(message = "已从压缩包导入 ${bundle.files.size} 个文件到 $songId$warn")
             }
         }
     }
@@ -316,6 +372,211 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun loadAssetBytes(relPath: String): ByteArray? =
         withContext(Dispatchers.IO) { _state.value.project?.readEntry(relPath) }
 
+    /**
+     * 读取某首歌曲主难度谱面的最晚时刻（毫秒），用于练习谱生成器的区间滑块上限。
+     * 按难度优先 2→3→4 找第一个存在的 aff。
+     */
+    suspend fun loadChartMaxMs(songId: String): Long {
+        val project = _state.value.project ?: return 0L
+        return withContext(Dispatchers.IO) {
+            for (rc in listOf(2, 3, 4, 1, 0)) {
+                val bytes = project.readEntry(ApkProject.songPrefix(songId) + "$rc.aff") ?: continue
+                val ms = chartEndMs(bytes.toString(Charsets.UTF_8))
+                if (ms > 0) return@withContext (ms / 1000).toLong() * 1000 // 取整到秒
+            }
+            0L
+        }
+    }
+
+    /**
+     * 反向导出单曲为资源 zip（含 songdata.json + 谱面/音频/封面）到 SAF。
+     */
+    fun reverseExportSong(uri: Uri, songId: String) {
+        val project = _state.value.project ?: return
+        runBusy("正在导出单曲…") {
+            val song = project.song(songId) ?: throw IllegalStateException("找不到歌曲：$songId")
+            mutex.withLock {
+                // 收集该歌曲目录下的资源，只待谱面/音频/封面，跳过不需要的
+                val files = LinkedHashMap<String, ByteArray>()
+                for (name in project.listSongFiles(songId)) {
+                    if (!isExportableResource(name)) continue
+                    val bytes = withContext(Dispatchers.IO) { project.readEntry(ApkProject.songPrefix(songId) + name) }
+                    if (bytes != null) files[name] = bytes
+                }
+                val out = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
+                } ?: throw IllegalStateException("无法写入所选位置")
+                SongZip.write(song, files, out)
+                out.close()
+                publish(message = "已导出单曲 ${song.title() ?: song.id}（songdata.json + ${files.size} 个资源文件）")
+            }
+        }
+    }
+
+    /**
+     * 生成练习谱：切割 + 变速选中的难度谱面与音频。
+     */
+    fun generatePractice(req: PracticeRequest) {
+        val songId = req.songId
+        val rcs = req.rcs
+        val overwriteInPlace = req.overwriteInPlace
+        val newId = req.newId
+        val project = _state.value.project ?: return
+        val song = project.song(songId) ?: throw IllegalArgumentException("找不到歌曲：$songId")
+        runBusy("正在生成练习谱…") {
+            mutex.withLock {
+                if (!overwriteInPlace && newId.isNullOrBlank()) {
+                    throw IOException("复制新曲时必须指定新的歌曲 id")
+                }
+                var changed = false
+                val summaries = ArrayList<String>()
+                val total = rcs.size
+                rcs.forEachIndexed { index, rc ->
+                    // 进度：每处理一个难度推进一次
+                    publish(busy = true, stage = "正在生成 ${Song.difficultyLabel(rc)}…", progress = (index * 100) / total)
+                    val affPath = ApkProject.songPrefix(songId) + "$rc.aff"
+                    val affBytes = withContext(Dispatchers.IO) { project.readEntry(affPath) }
+                        ?: throw IOException("缺少难度 $rc 的谱面 $rc.aff")
+                    val affText = affBytes.toString(Charsets.UTF_8)
+                    if (req.endMs <= req.startMs) throw IOException("结束时间必须大于开始时间")
+                    val bufferStart = bufferStartWithBar(affText, req.startMs.toDouble())
+                    if (bufferStart >= req.endMs) throw IOException("所选区间过短，不足预留缓冲")
+
+                    val newAff = AffTransform.slice(affText, bufferStart, req.endMs.toDouble(), req.speed)
+
+                    // 音频：与该难度/基础音频；0..4 难度优先取对应 <rc>.ogg 或 base.ogg
+                    val audioName = audioNameFor(project, songId, rc)
+                    val audioTmp: File? = if (audioName != null) {
+                        val audioBytes = withContext(Dispatchers.IO) { project.readEntry(ApkProject.songPrefix(songId) + audioName) }
+                        if (audioBytes != null) {
+                            val src = Ffmpeg.uniqueFile(repo.importDir, "audio-src", "ogg")
+                            src.writeBytes(audioBytes)
+                            val out = Ffmpeg.uniqueFile(repo.importDir, "audio-out", "ogg")
+                            Ffmpeg.transform(
+                                getApplication<Application>(), src, out,
+                                bufferStart.toLong(), (req.endMs - bufferStart).toLong(), req.speed,
+                                onProgress = { frac ->
+                                    // 音频变速细分：在当前难度区间内 0..1 映射成全局 0..99
+                                    val base = (index * 100) / total
+                                    publish(
+                                        busy = true,
+                                        stage = "正在变速音频（${Song.difficultyLabel(rc)}）…",
+                                        progress = base + (frac * (100f / total)).toInt().coerceAtMost(99),
+                                    )
+                                },
+                            )
+                            src.delete()
+                            out
+                        } else null
+                    } else null
+
+                    val targetPrefix = if (overwriteInPlace) ApkProject.songPrefix(songId)
+                    else {
+                        ApkProject.songPrefix(newId!!)
+                    }
+                    // 写谱面
+                    project.stageWriteBytes(targetPrefix + "$rc.aff", newAff.toByteArray(Charsets.UTF_8))
+                    // 写音频（若有变速）
+                    audioTmp?.let { project.stageWriteFile(targetPrefix + audioName!!, it) }
+
+                    summaries.add("${Song.difficultyLabel(rc)}: ${(newAff.length / 1024)}KB" +
+                        (if (audioTmp != null) " + 音频" else "（未变速音频）"))
+                    changed = true
+                }
+                if (!changed) throw IOException("没有可处理的难度")
+
+                // 非原地：需要新增歌曲（写 songlist），并沿用源歌曲的元数据（bpm/bg/set…）
+                if (!overwriteInPlace && newId != null) {
+                    publish(busy = true, stage = "正在建立新歌曲…", progress = 98)
+                    val newSong = buildPracticeSong(song, newId, rcs, req.newTitle)
+                    project.addSong(newSong)
+
+                    // 把源歌曲的其它资源（封面 base.jpg / base_256.jpg、非本次重写的 .ogg 等）一并复制到新目录，
+                    // 否则新曲在游戏里没有封面可显示。
+                    val copiedExtra = copyExtraResources(project, songId, newId)
+                    if (copiedExtra.isNotEmpty()) {
+                        summaries.add("已复制 ${copiedExtra.size} 个其它资源")
+                    }
+                }
+                publish(message = "已生成练习谱：${summaries.joinToString("；")}")
+            }
+        }
+    }
+
+    /**
+     * 基于源歌曲构造练习新曲：深层复制源 song 的 json，只替换 id 与标题。
+     * 这样 bpm / bpm_base / bg / set / side / artist / audioPreview 等字段都会自动沿用源歌曲。
+     */
+    private fun buildPracticeSong(source: Song, newId: String, rcs: List<Int>, newTitle: String?): Song {
+        val cloned = JsonObject()
+        for (key in source.json.keys) {
+            cloned.put(key, source.json[key])
+        }
+        val newSong = Song(cloned)
+        newSong.id = newId
+        newSong.set = source.set
+        // 显示名：用户指定则用指定的（不追加后缀）；否则沿用源曲名
+        val finalTitle = newTitle?.takeIf { it.isNotBlank() } ?: (source.title("en") ?: source.id)
+        newSong.setTitle("en", finalTitle)
+
+        // 难度只保留本次生成的难度，复制源对应难度的字段
+        val diffs = JsonArray()
+        for (rc in rcs) {
+            val srcD = source.difficulty(rc) ?: JsonObject()
+            val d = JsonObject()
+            d.put("ratingClass", JsonNumber.of(rc))
+            d.put("chartDesigner", srcD.get("chartDesigner") ?: JsonString(""))
+            d.put("jacketDesigner", srcD.get("jacketDesigner") ?: JsonString(""))
+            d.put("rating", srcD.get("rating") ?: JsonNumber.of(0))
+            diffs.add(d)
+        }
+        newSong.json.put("difficulties", diffs)
+        return newSong
+    }
+
+    /**
+     * 把源歌曲目录里的「其它」资源复制到新曲目录（练习谱新曲需要封面等文件）。
+     * 跳过 .aff（谱面由切片生成）与音频（base.ogg/<rc>.ogg 由变速流程或整段复制处理，
+     * 但这里仍复制未被本次重写的音频，如 base_256 之外的封面 jpg）。
+     * @return 复制的文件名列表
+     */
+    private fun copyExtraResources(project: ApkProject, srcSongId: String, dstSongId: String): List<String> {
+        val srcPrefix = ApkProject.songPrefix(srcSongId)
+        val dstPrefix = ApkProject.songPrefix(dstSongId)
+        val copied = ArrayList<String>()
+        val audioExts = setOf("ogg", "opus", "mp3", "wav", "m4a", "aac", "flac")
+        for (name in project.listSongFiles(srcSongId)) {
+            val dot = name.lastIndexOf('.')
+            val ext = if (dot >= 0) name.substring(dot + 1).lowercase() else ""
+            // 谱面与音频由前面流程处理，这里只复制封面等其它资源
+            if (name.endsWith(".aff", ignoreCase = true)) continue
+            if (audioExts.contains(ext)) continue
+            val bytes = project.readEntry(srcPrefix + name) ?: continue
+            project.stageWriteBytes(dstPrefix + name, bytes)
+            copied.add(name)
+        }
+        return copied
+    }
+
+    private fun audioNameFor(project: ApkProject, songId: String, rc: Int): String? {
+        val base = "${ApkProject.SONGS_ROOT}$songId/base.ogg"
+        val override = "${ApkProject.SONGS_ROOT}$songId/$rc.ogg"
+        return when {
+            project.exists(override) -> "$rc.ogg"
+            project.exists(base) -> "base.ogg"
+            else -> null
+        }
+    }
+
+    private fun isExportableResource(name: String): Boolean {
+        if (name.endsWith(".aff", ignoreCase = true)) return true
+        val dot = name.lastIndexOf('.')
+        if (dot < 0 || dot == name.length - 1) return false
+        val ext = name.substring(dot + 1).lowercase()
+        return ext in setOf("ogg", "opus", "mp3", "wav", "m4a", "aac", "flac",
+            "jpg", "jpeg", "png", "webp", "bmp")
+    }
+
     /* ------------------------------ 歌曲 / 曲包 ------------------------------ */
 
     /**
@@ -337,9 +598,15 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
                 publish(busy = true, stage = stage, progress = percent)
             }
             mutex.withLock {
+                // 没有 songdata.json 时，用主难度谱面识别出的 BPM 填充 bpm / bpm_base
+                if (bundle.metadata == null && bundle.bpm != null) {
+                    song.bpm = bundle.bpm.range
+                    song.bpmBase = bundle.bpm.base
+                }
                 project.addSongWithResources(song, bundle)
-                val filled = if (bundle.metadata != null) "，并用包内信息填充了字段" else ""
-                publish(message = "已新增歌曲 ${song.id}，导入 ${bundle.files.size} 个资源文件$filled")
+                val filled = if (bundle.metadata != null) "，并用包内信息填充了字段" else if (bundle.bpm != null) "，并根据主难度谱面识别了 BPM" else ""
+                val warn = if (bundle.warnings.isEmpty()) "" else "\n\n" + bundle.warnings.joinToString("\n")
+                publish(message = "已新增歌曲 ${song.id}，导入 ${bundle.files.size} 个资源文件$filled$warn")
             }
         }
     }

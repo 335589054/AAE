@@ -177,13 +177,26 @@ class ApkProject(val apkFile: File) : Closeable {
         writes[name]?.let { op ->
             return when (op) {
                 is WriteOp.Bytes -> op.data
-                is WriteOp.FromFile -> op.file.readBytes()
+                // 暂存文件可能已被「清理缓存 / 清空数据」删除：此时按「文件不存在」处理，
+                // 而不是抛 FileNotFoundException（否则界面读取 → Compose 协程会因此闪退）。
+                is WriteOp.FromFile -> try {
+                    op.file.readBytes()
+                } catch (_: IOException) {
+                    null
+                }
             }
         }
-        if (name == MANIFEST_PATH && packageNameOverride != null) {
-            return Axml.setPackageName(originalManifestRaw, packageNameOverride!!, rewriteIdentifiers)
+        // 其余读取都来自 ZIP 源，走到这里说明工程可能正在被关闭 / 源文件被清理。
+        // 同样按「文件不存在 / 读取失败」兜底返回 null，绝不让异常冒泡到界面协程导致闪退。
+        return try {
+            if (name == MANIFEST_PATH && packageNameOverride != null) {
+                Axml.setPackageName(originalManifestRaw, packageNameOverride!!, rewriteIdentifiers)
+            } else {
+                reader.readFile(name)
+            }
+        } catch (_: IOException) {
+            null
         }
-        return reader.readFile(name)
     }
 
     /** 某首歌目录下的文件名（已计入暂存的增删） */

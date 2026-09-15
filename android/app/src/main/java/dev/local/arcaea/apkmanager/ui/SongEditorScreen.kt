@@ -1,5 +1,6 @@
 package dev.local.arcaea.apkmanager.ui
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -87,6 +88,59 @@ private fun numberText(value: Double?): String {
     return if (value == Math.floor(value) && !value.isInfinite()) value.toLong().toString() else value.toString()
 }
 
+/**
+ * 解析压缩包里的 songdata 片段，把它提供的字段合并进当前表单 [base]，
+ * 返回一份新的待保存表单（`dirty` 会随之变为 true，由用户点「保存修改」写回）。
+ * 只覆盖 songdata 中有值的字段；曲包(set)永远保留表单里的选择，避免指到不存在的曲包。
+ */
+private fun mergeSongdataIntoEdit(base: SongEdit, meta: JsonObject): SongEdit {
+    fun text(key: String, fallback: String): String =
+        (meta.get(key) as? JsonString)?.value?.takeIf { it.isNotEmpty() } ?: fallback
+
+    // 标题：songdata 的 title_localized.en，其次 title 字段，最后保留原值
+    val songTitle = (meta.get("title_localized") as? JsonObject)?.optString("en")
+        ?: (meta.get("title") as? JsonString)?.value
+        ?: base.title
+
+    val newDiffs = base.diffs.toMutableList()
+    val diffArray = meta.optArray("difficulties")
+    diffArray?.toList()?.forEach { item ->
+        if (item is JsonObject) {
+            val rc = (item["ratingClass"] as? JsonNumber)?.toInt() ?: return@forEach
+            val existing = newDiffs.firstOrNull { it.rc == rc }
+            val updated = DiffEdit(
+                rc = rc,
+                exists = true,
+                rating = (item["rating"] as? JsonNumber)?.toInt()?.toString()
+                    ?: (item["rating"] as? JsonString)?.value ?: existing?.rating ?: "0",
+                ratingPlus = existing?.ratingPlus ?: false,
+                chartDesigner = item.optString("chartDesigner") ?: "",
+                jacketDesigner = item.optString("jacketDesigner") ?: "",
+                audioOverride = existing?.audioOverride ?: false,
+                title = (item.get("title_localized") as? JsonObject)?.optString("en") ?: "",
+            )
+            val idx = newDiffs.indexOfFirst { it.rc == rc }
+            if (idx >= 0) newDiffs[idx] = updated else newDiffs += updated
+        }
+    }
+
+    return base.copy(
+        title = songTitle,
+        artist = text("artist", base.artist),
+        bpm = text("bpm", base.bpm),
+        bpmBase = (meta["bpm_base"] as? JsonNumber)?.let { numberText(it.toDouble()) } ?: base.bpmBase,
+        side = (meta["side"] as? JsonNumber)?.toInt()?.toString() ?: base.side,
+        bg = text("bg", base.bg),
+        date = (meta["date"] as? JsonNumber)?.toLong()?.toString() ?: text("date", base.date),
+        version = text("version", base.version),
+        purchase = text("purchase", base.purchase),
+        audioPreview = (meta["audioPreview"] as? JsonNumber)?.toLong()?.toString() ?: text("audioPreview", base.audioPreview),
+        audioPreviewEnd = (meta["audioPreviewEnd"] as? JsonNumber)?.toLong()?.toString() ?: text("audioPreviewEnd", base.audioPreviewEnd),
+        set = base.set, // 保留用户选择的曲包
+        diffs = newDiffs,
+    )
+}
+
 private fun readDiff(rc: Int, difficulty: JsonObject): DiffEdit = DiffEdit(
     rc = rc,
     exists = true,
@@ -135,7 +189,7 @@ private fun applySongEdit(song: Song, edit: SongEdit) {
     song.side = edit.side.trim().toIntOrNull()
     song.bg = edit.bg.ifBlank { null }
     song.date = edit.date.trim().toLongOrNull()
-    song.version = edit.version.ifBlank { null }
+    song.version = edit.version.ifBlank { "" }
     song.purchase = edit.purchase
     song.audioPreview = edit.audioPreview.trim().toLongOrNull()
     song.audioPreviewEnd = edit.audioPreviewEnd.trim().toLongOrNull()
@@ -205,9 +259,22 @@ fun SongEditorScreen(
             vm.importAsset(uri, prefix + name)
         }
     }
+    // 待「用 songdata 填充」确认的 zip 与其元数据
     val importZip = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             ThumbCache.clear()
+            val meta = vm.readResourceZipMetadata(uri)
+            if (meta != null) {
+                // 解析 zip 里的 songdata → 只更新表单(edit)，标记为「有未保存修改」；
+                // 不直接写 song.json，由用户点「保存修改」才写回（可随时放弃）。
+                edit = mergeSongdataIntoEdit(edit, meta)
+            } else {
+                // 没有 songdata.json：尝试从主难度谱面识别 BPM，填充 bpm / bpm_base 到表单
+                vm.readResourceBpmFromZip(uri)?.let { bpmInfo ->
+                    edit = edit.copy(bpm = bpmInfo.range, bpmBase = numberText(bpmInfo.base))
+                }
+            }
+            // 无论如何都解压资源文件到歌曲目录
             vm.importResourceZip(uri, song.id)
         }
     }
@@ -216,6 +283,16 @@ fun SongEditorScreen(
         val path = exportingPath
         exportingPath = null
         if (uri != null && path != null) vm.exportAssetTo(uri, path)
+    }
+    var exportingZip by remember { mutableStateOf(false) }
+    val exportZip = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        exportingZip = false
+        if (uri != null) vm.reverseExportSong(uri, song.id)
+    }
+    var showPractice by remember { mutableStateOf(false) }
+    var practiceMaxMs by remember(song.id, version) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(showPractice, song.id) {
+        if (showPractice) practiceMaxMs = vm.loadChartMaxMs(song.id)
     }
     var deletePath by remember { mutableStateOf<String?>(null) }
 
@@ -489,7 +566,22 @@ fun SongEditorScreen(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("导入资源压缩包（自动剥离目录前缀）")
+                    Text("导入资源压缩包（带 songdata 会自动填充标题/难度）")
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            exportingZip = true
+                            exportZip.launch("${song.id}.zip")
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("导出单曲 zip") }
+                    OutlinedButton(
+                        onClick = { showPractice = true },
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("生成练习谱") }
                 }
                 Text(
                     text = "谱面用 <难度>.aff（如 2.aff），音频用 base.ogg / <难度>.ogg，封面用 base.jpg 与 base_256.jpg。",
@@ -573,6 +665,23 @@ fun SongEditorScreen(
                 onClose()
             },
             onDismiss = { confirmExit = false },
+        )
+    }
+
+    if (showPractice) {
+        PracticeDialog(
+            songId = song.id,
+            songTitle = song.title() ?: song.id,
+            validDifficulties = files.mapNotNull { name ->
+                name.substringBeforeLast('.').toIntOrNull()?.takeIf { name.endsWith(".aff") }
+            }.distinct().sorted(),
+            maxMs = practiceMaxMs ?: 0L,
+            busy = busy,
+            onDismiss = { showPractice = false },
+            onGenerate = { args ->
+                showPractice = false
+                vm.generatePractice(args)
+            },
         )
     }
 }

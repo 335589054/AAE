@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,11 +48,15 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.local.arcaea.apkmanager.core.ApkProject
 import dev.local.arcaea.apkmanager.core.JsonNumber
+import dev.local.arcaea.apkmanager.core.JsonObject
 import dev.local.arcaea.apkmanager.core.Pack
+import dev.local.arcaea.apkmanager.core.ResourceZip
 import dev.local.arcaea.apkmanager.core.Song
 import dev.local.arcaea.apkmanager.data.ApkViewModel
 import dev.local.arcaea.apkmanager.data.UiState
+import java.util.zip.ZipInputStream
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** 歌曲页：列表（缩略图 / 难度徽章 / 搜索）+ 行操作菜单 + 新增 + 进入编辑页。 */
@@ -190,6 +195,7 @@ fun SongsTab(state: UiState, vm: ApkViewModel, modifier: Modifier = Modifier) {
         NewSongDialog(
             packIds = packs.map { it.id },
             busy = state.busy,
+            vm = vm,
             onDismiss = { showNew = false },
             onCreate = { id, setId, title, zip ->
                 showNew = false
@@ -215,6 +221,7 @@ private fun MenuAction(text: String, danger: Boolean = false, onClick: () -> Uni
 private fun NewSongDialog(
     packIds: List<String>,
     busy: Boolean,
+    vm: ApkViewModel,
     onDismiss: () -> Unit,
     onCreate: (id: String, setId: String, title: String, zip: Uri?) -> Unit,
 ) {
@@ -223,21 +230,29 @@ private fun NewSongDialog(
     var setId by remember { mutableStateOf(packIds.firstOrNull() ?: "") }
     var zipUri by remember { mutableStateOf<Uri?>(null) }
     var zipName by remember { mutableStateOf<String?>(null) }
+    // 从压缩包里读到的曲目信息（用于即时反馈；最终数据仍在「创建」时合并）
+    var metadata by remember { mutableStateOf<JsonObject?>(null) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val trimmedId = id.trim()
     val validId = trimmedId.isNotEmpty() && !trimmedId.contains('/') && !trimmedId.contains(' ')
 
     val pickZip = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            val name = displayName(context, uri)
             zipUri = uri
+            val name = displayName(context, uri)
             zipName = name
-            if (name != null) {
-                // 用文件名自动填标题（去掉扩展名），用户之后仍可手动修改。
-                title = stripZipExtension(name)
-                // id 仍为空时，用文件名推导一个合法的初始 id。
-                if (id.isBlank()) id = toSongId(name)
+            metadata = null
+            // 异步读取 zip 里的 songdata.json / songlist / slst，把标题等即时反馈到界面
+            scope.launch(Dispatchers.IO) {
+                val meta = vm.readResourceZipMetadata(uri)
+                withContext(Dispatchers.Main) { metadata = meta }
             }
+            // 标题：优先用 songdata 的英文标题，其次用 zip 文件名
+            val songTitle = firstEnTitle(context, uri) ?: (if (name != null) stripZipExtension(name) else null)
+            if (songTitle != null) title = songTitle
+            // id 仍为空时，用文件名推导一个合法的初始 id。
+            if (id.isBlank()) id = toSongId(name ?: "song")
         }
     }
 
@@ -306,6 +321,7 @@ private fun NewSongDialog(
                     onClick = {
                         zipUri = null
                         zipName = null
+                        metadata = null
                     },
                     enabled = !busy,
                 ) {
@@ -313,30 +329,78 @@ private fun NewSongDialog(
                 }
             }
         }
-        if (zipUri != null) {
+        if (zipUri == null) {
             Text(
-                text = "已选择：${zipName ?: "（未知文件）"}",
+                text = "选择后会把包内文件自动解压到 assets/songs/<id>/（支持根目录 / <歌曲目录>/… / assets/songs/<id>/… 三种结构），并自动用包内的 songdata.json / songlist / slst 填充曲名、曲师、BPM 等字段与难度列表；id 与曲包始终以这里填写的为准。",
                 style = MaterialTheme.typography.labelSmall,
                 color = AppTextDim,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
+        } else {
+            val meta = metadata
+            if (meta == null) {
+                Text(
+                    text = "已选择：${zipName ?: "（未知文件）"}。正在读取包内曲目信息…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AppTextDim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                val enTitle = meta.optObject("title_localized")?.optString("en")
+                    ?: meta.optString("title")
+                val artist = meta.optString("artist")
+                val diffCount = meta.optArray("difficulties")?.size
+                Text(
+                    text = buildString {
+                        append("已选择：${zipName ?: "（未知文件）"}，已从 songdata.json 读取：")
+                        if (enTitle != null) append(" 曲名「$enTitle」")
+                        if (artist != null && artist.isNotEmpty()) append(" 曲师 $artist")
+                        if (diffCount != null) append(" $diffCount 个难度")
+                        if (enTitle == null && artist == null && diffCount == null) append(" 未读到曲名（将用文件名）")
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AppTextDim,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "确认会在创建后用包内信息填充标题、曲师、BPM 与难度列表（可以再改）。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AppTextDim,
+                )
+            }
         }
-        Text(
-            text = "选择后会把包内文件自动解压到 assets/songs/<id>/（支持根目录 / <歌曲目录>/… / assets/songs/<id>/… 三种结构），并自动用包内的 songdata.json / songlist / slst 填充曲名、曲师、BPM 等字段与难度列表；id 与曲包始终以这里填写的为准。",
-            style = MaterialTheme.typography.labelSmall,
-            color = AppTextDim,
-        )
-        Text(
-            text = "若压缩包内也带有曲名等信息，会用包内信息覆盖上面填写的标题（以包内为准）。",
-            style = MaterialTheme.typography.labelSmall,
-            color = AppTextDim,
-        )
         Text(
             text = "创建后请在该歌曲的资源文件里导入封面（base.jpg / base_256.jpg）与谱面（<难度>.aff），否则导出后曲目不可用。",
             style = MaterialTheme.typography.labelSmall,
             color = AppTextDim,
         )
+    }
+}
+
+/** 读取压缩包元数据里的英文标题（用于即时填充；读不到返回 null）。 */
+private fun firstEnTitle(context: Context, uri: Uri): String? {
+    return try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            ZipInputStream(input).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (!entry.isDirectory && ResourceZip.isMetadataName(entry.name)) {
+                        val meta = ResourceZip.parseSongFragment(zip.readBytes())
+                        zip.closeEntry()
+                        if (meta != null) {
+                            val title = meta.optObject("title_localized")?.optString("en")
+                            if (!title.isNullOrBlank()) return title
+                        }
+                    } else {
+                        zip.closeEntry()
+                    }
+                }
+                null
+            }
+        }
+    } catch (_: Throwable) {
+        null
     }
 }
 

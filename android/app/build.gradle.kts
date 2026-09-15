@@ -31,6 +31,9 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // debug 也使用仓库内的固定密钥，保证任何机器、任何时间打出的包签名一致，
+            // 便于用「adb install -r」无缝覆盖升级（不会因签名变化要求卸载重装）。
+            signingConfig = signingConfigs.getByName("releaseKey")
         }
         release {
             isMinifyEnabled = false
@@ -56,6 +59,9 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // 内置静态 ffmpeg 以 jniLibs 形式打包：需要解压为实体文件到 nativeLibraryDir，
+        // 才能用 ProcessBuilder 执行（否则只包在 APK 里没有可执行实体）。
+        jniLibs.useLegacyPackaging = true
     }
 }
 

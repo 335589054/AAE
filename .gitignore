@@ -32,3 +32,16 @@ android/captures/
 
 # 参考用的单曲数据模板（格式已在 android 自检里以等价样例固化）
 android/songdata..json
+
+# 内置 ffmpeg 静态二进制（~82MB，不随仓库提交；如需启用请自行放回
+# android/app/src/main/jniLibs/arm64-v8a/libffmpegnative.so）
+android/app/src/main/jniLibs/
+
+# 会话临时 / 诊断产物
+android/_extracted/
+android/_*.ps1
+android/everythingbk.zip
+.trae/
+
+# 谱面 zip 样本（体积较大，仅本地调试用，不随仓库提交）
+zipsample/

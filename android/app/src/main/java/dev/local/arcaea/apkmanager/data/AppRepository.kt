@@ -6,6 +6,9 @@ import dev.local.arcaea.apkmanager.core.ApkProject
 import dev.local.arcaea.apkmanager.core.BuildOptions
 import dev.local.arcaea.apkmanager.core.JsonObject
 import dev.local.arcaea.apkmanager.core.ResourceZip
+import dev.local.arcaea.apkmanager.core.SongBpmInfo
+import dev.local.arcaea.apkmanager.core.isChartEmpty
+import dev.local.arcaea.apkmanager.core.parseSongBpm
 import dev.local.arcaea.apkmanager.core.Signer
 import dev.local.arcaea.apkmanager.core.SongResourceBundle
 import java.io.File
@@ -163,6 +166,74 @@ class AppRepository(private val context: Context) {
         get() = File(workDir, "import").apply { if (!exists()) mkdirs() }
 
     /**
+     * 轻量读取压缩包里的曲目元数据片段（songdata.json / songlist / slst …），
+     * **不落地任何文件**，仅用于界面上「选择 zip 后立刻反馈已读取到的曲目信息」。
+     * 返回解析出的第一个对象；压缩包里没有元数据时返回 `null`。
+     */
+    fun readResourceMetadata(uri: Uri): JsonObject? {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            ZipInputStream(input).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (entry.isDirectory) {
+                        zip.closeEntry()
+                        continue
+                    }
+                    if (ResourceZip.isMetadataName(entry.name)) {
+                        val fragment = ResourceZip.parseSongFragment(zip.readBytes())
+                        zip.closeEntry()
+                        if (fragment != null) return fragment
+                    } else {
+                        zip.closeEntry()
+                    }
+                }
+                return null
+            }
+        }
+        return null
+    }
+
+    /**
+     * 从压缩包里读取「主难度」谱面的 BPM（优先级 2.aff → 3.aff → 4.aff）。
+     * 用于没有 songdata.json 的压缩包：根据谱面里出现的 timing 识别 BPM 范围与主导 BPM。
+     *
+     * 压缩包条目的出现顺序不保证按难度排序，因此这里扫描完整个包后，
+     * 取难度数值最小（2 < 3 < 4）的那份，而不是遇到第一个就返回。
+     */
+    fun readResourceBpmFromZip(uri: Uri): SongBpmInfo? {
+        var best: SongBpmInfo? = null
+        var bestDifficulty = 99
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            ZipInputStream(input).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (entry.isDirectory) {
+                        zip.closeEntry()
+                        continue
+                    }
+                    val base = entry.name.replace('\\', '/').substringAfterLast('/')
+                    val difficulty = base.removeSuffix(".aff").takeIf { it.length == 1 }?.toIntOrNull()
+                    if (difficulty != null && difficulty in 2..4 && !ResourceZip.isMetadataName(entry.name)) {
+                        val text = zip.readBytes().toString(Charsets.UTF_8)
+                        zip.closeEntry()
+                        parseSongBpm(text)?.let { info ->
+                            // 主难度优先级：难度数值越小越高（2 → 3 → 4）
+                            if (difficulty < bestDifficulty) {
+                                best = info
+                                bestDifficulty = difficulty
+                            }
+                        }
+                        continue
+                    }
+                    zip.closeEntry()
+                }
+                return best
+            }
+        }
+        return null
+    }
+
+    /**
      * 解压用户选择的资源压缩包，并按 [ResourceZip] 的规则规范化条目名
      * （支持根目录 / `<歌曲id>/…` / `assets/songs/<歌曲id>/…` 三种结构），
      * 同时尝试解析包内的单曲元数据片段（songlist / slst / songlist.txt / song.json）。
@@ -173,7 +244,11 @@ class AppRepository(private val context: Context) {
         // 最终导出时报 ENOENT。这里改成唯一目录，之前的暂存文件不再受影响。
         val outDir = File(importDir, "zip-${System.currentTimeMillis()}-${zipSequence++}").apply { mkdirs() }
         val files = LinkedHashMap<String, File>()
+        val warnings = mutableListOf<String>()
         var metadata: JsonObject? = null
+        // 没有 songdata 时，从主难度谱面识别 BPM：按难度优先级 2→3→4（数值越小优先级越高）
+        var bpmFromAff: SongBpmInfo? = null
+        var bpmPriority = 99
         context.contentResolver.openInputStream(uri)?.use { input ->
             ZipInputStream(input).use { zip ->
                 val buffer = ByteArray(1 shl 20)
@@ -219,6 +294,26 @@ class AppRepository(private val context: Context) {
                         }
                     }
                     files[name] = file
+                    // 空谱面检测：.aff 没有任何音符（物量为 0，游戏中无法游玩）
+                    if (name.endsWith(".aff", ignoreCase = true) && file.exists()) {
+                        val text = file.readBytes().toString(Charsets.UTF_8)
+                        if (isChartEmpty(text)) {
+                            warnings.add(
+                                "$name 是空谱面（只有 AudioOffset/timing，没有任何音符），" +
+                                    "游戏里会显示物量 0、无法游玩。请提供含音符的 .aff。",
+                            )
+                        }
+                    }
+                    // BPM 识别：只在没有 songdata 时，按主难度优先级（2→3→4）记录
+                    if (metadata == null && name.endsWith(".aff", ignoreCase = true)) {
+                        val difficulty = name.substringBeforeLast('.').toIntOrNull()
+                        if (difficulty != null && difficulty in 2..4 && file.exists() && difficulty < bpmPriority) {
+                            parseSongBpm(file.readText(Charsets.UTF_8))?.let {
+                                bpmFromAff = it
+                                bpmPriority = difficulty
+                            }
+                        }
+                    }
                     onProgress("正在解压 $name…", 0)
                     zip.closeEntry()
                 }
@@ -226,7 +321,7 @@ class AppRepository(private val context: Context) {
         } ?: throw IOException("无法读取所选压缩包")
         if (files.isEmpty() && metadata == null) throw IOException("压缩包里没有可用的歌曲资源")
         onProgress("解压完成（${files.size} 个文件）", 100)
-        return SongResourceBundle(files.toList(), metadata)
+        return SongResourceBundle(files.toList(), metadata, bpmFromAff?.takeIf { metadata == null }, warnings)
     }
 
     /** 当前缓存占用明细 */
@@ -273,6 +368,17 @@ class AppRepository(private val context: Context) {
         cachedExportApk.delete()
         File(workDir, "import").deleteRecursively()
         File(workDir, "selftest").deleteRecursively()
+    }
+
+    /**
+     * 一键清空应用全部数据：删除整个工作目录（含导入的源 APK、打包中间产物、暂存资源、
+     * 自检文件）+ 应用缓存目录 + 外部缓存目录。常用于「几乎用完了 / 想彻底重置」的场景。
+     * 注意：会关闭当前工程，尚未导出的改动一并丢失。
+     */
+    fun clearAllData() {
+        clearWork()
+        context.cacheDir?.listFiles()?.forEach { it.deleteRecursively() }
+        context.externalCacheDir?.listFiles()?.forEach { it.deleteRecursively() }
     }
 
     private fun dirSize(dir: File): Long =

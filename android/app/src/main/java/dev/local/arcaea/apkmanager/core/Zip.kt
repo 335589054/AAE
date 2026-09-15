@@ -175,6 +175,21 @@ class ZipReader(file: File) : Closeable {
     private val raf: RandomAccessFile = RandomAccessFile(file, "r")
     private val fileSize: Long = raf.length()
 
+    @Volatile
+    private var closed = false
+
+    /**
+     * 串行化对底层 RandomAccessFile 的访问。
+     *
+     * 背景：导出会持续 `seek+read` 底层文件；同时「歌曲列表缩略图 / 编辑页文件大小」等
+     * 后台读取也会直接读同一个 `raf`。两者并发时，非线程安全的 RandomAccessFile 会把文件指针
+     * 相互踩坏，轻则读到脏数据（表现为「导出时读取进程卡住」），重则在 [close] 关闭句柄的瞬间
+     * 仍旧在飞的读取抛 IOException → 界面协程直接闪退（正是「清理缓存后仍闪退」的根因）。
+     * 这里让所有读操作（含整条目直通拷贝）都以 [lock] 互斥，[close] 也等在锁外，
+     * 从而既保证导出输出不被中途打断，也保证绝不会有一个读取正在关闭后的句柄上运行。
+     */
+    private val lock = Any()
+
     val size: Long get() = fileSize
 
     init {
@@ -187,10 +202,14 @@ class ZipReader(file: File) : Closeable {
     }
 
     override fun close() {
-        try {
-            raf.close()
-        } catch (_: Throwable) {
-            /* ignore */
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            try {
+                raf.close()
+            } catch (_: Throwable) {
+                /* ignore */
+            }
         }
     }
 
@@ -227,30 +246,35 @@ class ZipReader(file: File) : Closeable {
 
     /** 将某个条目的压缩数据原样拷贝到另一个输出流（直通，不解压） */
     fun copyEntryRaw(entry: ZipEntryInfo, out: OutputStream, chunkSize: Int = 4 * 1024 * 1024) {
-        var remaining = entry.compressedSize
-        var position = entry.dataOffset
-        val chunk = ByteArray(minOf(chunkSize.toLong(), maxOf(remaining, 1L)).toInt())
-        while (remaining > 0) {
-            val toRead = minOf(chunk.size.toLong(), remaining).toInt()
-            raf.seek(position)
-            val read = raf.read(chunk, 0, toRead)
-            if (read <= 0) break
-            out.write(chunk, 0, read)
-            position += read
-            remaining -= read
+        // 整条目拷贝必须持锁完成，否则会与另一个后台读取交错 seek，把导出数据写脏
+        synchronized(lock) {
+            var remaining = entry.compressedSize
+            var position = entry.dataOffset
+            val chunk = ByteArray(minOf(chunkSize.toLong(), maxOf(remaining, 1L)).toInt())
+            while (remaining > 0) {
+                val toRead = minOf(chunk.size.toLong(), remaining).toInt()
+                raf.seek(position)
+                val read = raf.read(chunk, 0, toRead)
+                if (read <= 0) break
+                out.write(chunk, 0, read)
+                position += read
+                remaining -= read
+            }
         }
     }
 
     private fun readAt(offset: Long, length: Int): ByteArray {
-        val buf = ByteArray(length)
-        raf.seek(offset)
-        var off = 0
-        while (off < length) {
-            val n = raf.read(buf, off, length - off)
-            if (n <= 0) break
-            off += n
+        synchronized(lock) {
+            val buf = ByteArray(length)
+            raf.seek(offset)
+            var off = 0
+            while (off < length) {
+                val n = raf.read(buf, off, length - off)
+                if (n <= 0) break
+                off += n
+            }
+            return buf
         }
-        return buf
     }
 
     private fun parseCentralDirectory() {
