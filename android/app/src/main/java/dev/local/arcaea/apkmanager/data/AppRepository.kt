@@ -5,6 +5,7 @@ import android.net.Uri
 import dev.local.arcaea.apkmanager.core.ApkProject
 import dev.local.arcaea.apkmanager.core.BuildOptions
 import dev.local.arcaea.apkmanager.core.JsonObject
+import dev.local.arcaea.apkmanager.core.JsonString
 import dev.local.arcaea.apkmanager.core.ResourceZip
 import dev.local.arcaea.apkmanager.core.SongBpmInfo
 import dev.local.arcaea.apkmanager.core.isChartEmpty
@@ -319,9 +320,32 @@ class AppRepository(private val context: Context) {
                 }
             }
         } ?: throw IOException("无法读取所选压缩包")
-        if (files.isEmpty() && metadata == null) throw IOException("压缩包里没有可用的歌曲资源")
-        onProgress("解压完成（${files.size} 个文件）", 100)
-        return SongResourceBundle(files.toList(), metadata, bpmFromAff?.takeIf { metadata == null }, warnings)
+
+        // 背景图归类：社区 zip 常把 `<bg>.jpg` 放在标题目录下（如 Lost Requiem/djmax_wagd.jpg），
+        // 但游戏只从 assets/img/bg/1080/ 读取背景图，所以按 songlist 的 bg 字段把同名图片挪到那里。
+        // 排除常规封面名（base.jpg / 1080_base.jpg 等），避免把封面误当成背景图。
+        val extras = ArrayList<Pair<String, File>>()
+        val bg = (metadata?.get("bg") as? JsonString)?.value?.trim()?.takeIf { it.isNotEmpty() }
+        if (bg != null) {
+            val jacketNames = setOf(
+                "base.jpg", "base.png", "base_256.jpg", "base_256.png",
+                "1080_base.jpg", "1080_base.png", "1080_base_256.jpg", "1080_base_256.png",
+            )
+            for (ext in listOf("jpg", "jpeg", "png", "webp", "bmp")) {
+                val key = files.keys.firstOrNull {
+                    it.equals("$bg.$ext", ignoreCase = true) && it.lowercase() !in jacketNames
+                } ?: continue
+                val moved = files.remove(key) ?: continue
+                extras.add("assets/img/bg/1080/${bg.lowercase()}.$ext" to moved)
+                break
+            }
+        }
+
+        if (files.isEmpty() && metadata == null && extras.isEmpty()) throw IOException("压缩包里没有可用的歌曲资源")
+        onProgress("解压完成（${files.size + extras.size} 个文件）", 100)
+        return SongResourceBundle(
+            files.toList(), metadata, bpmFromAff?.takeIf { metadata == null }, warnings, extras,
+        )
     }
 
     /** 当前缓存占用明细 */

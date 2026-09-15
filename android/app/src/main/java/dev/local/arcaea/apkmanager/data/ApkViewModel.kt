@@ -311,8 +311,12 @@ class ApkViewModel(app: Application) : AndroidViewModel(app) {
                 for ((name, file) in bundle.files) {
                     project.stageWriteFile("${ApkProject.SONGS_ROOT}$songId/$name", file)
                 }
+                // 不属于歌曲目录的资源（如背景图）按完整 APK 相对路径写入
+                for ((path, file) in bundle.extras) {
+                    project.stageWriteFile(path, file)
+                }
                 val warn = if (bundle.warnings.isEmpty()) "" else "\n\n" + bundle.warnings.joinToString("\n")
-                publish(message = "已从压缩包导入 ${bundle.files.size} 个文件到 $songId$warn")
+                publish(message = "已从压缩包导入 ${bundle.files.size + bundle.extras.size} 个文件到 $songId$warn")
             }
         }
     }

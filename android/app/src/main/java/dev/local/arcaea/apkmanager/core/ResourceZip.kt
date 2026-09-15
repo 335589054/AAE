@@ -4,7 +4,7 @@ import java.io.File
 
 /** 从资源压缩包里解析出来的内容：资源文件 + 可选的单曲元数据片段 */
 data class SongResourceBundle(
-    /** 规范化后的文件名 → 已落地的本地文件 */
+    /** 规范化后的文件名 → 已落地的本地文件（写入 `assets/songs/<id>/`） */
     val files: List<Pair<String, File>>,
     /** 压缩包里带的 songlist / slst / songlist.txt / song.json 片段（可能为空） */
     val metadata: JsonObject?,
@@ -15,8 +15,14 @@ data class SongResourceBundle(
     val bpm: SongBpmInfo? = null,
     /** 导入过程中发现的提示（例如某个谱面文件是空谱面，物量为 0） */
     val warnings: List<String> = emptyList(),
+    /**
+     * 不属于歌曲目录、需要写到 APK 其它位置的资源：
+     * 「相对 APK 根的完整路径 → 已落地的本地文件」，例如
+     * `assets/img/bg/1080/djmax_wagd.jpg`（压缩包把背景图放在标题目录下时会被归到这里）。
+     */
+    val extras: List<Pair<String, File>> = emptyList(),
 ) {
-    val isEmpty: Boolean get() = files.isEmpty() && metadata == null
+    val isEmpty: Boolean get() = files.isEmpty() && metadata == null && extras.isEmpty()
 }
 
 /**
@@ -108,12 +114,33 @@ object ResourceZip {
     private val METADATA_NAMES = setOf(
         "songlist",
         "songlist.txt",
+        // 社区打包常见的变体（如 latentduality.zip 用 songlist.json）
+        "songlist.json",
         "slst",
         "song.json",
         // 资源包里常见的单曲数据文件（结构与 songlist 的单曲条目一致）
         "songdata.json",
         "songdata",
     )
+
+    /**
+     * 出现在歌曲目录之外的 APK / 资源目录前缀。
+     * 这些路径即使扩展名看起来像资源（.png/.jpg），也不该写进歌曲目录，
+     * 否则 `assets/img/bg/...`、`META-INF/...` 等会被误当成单曲资源。
+     */
+    private val NON_SONG_ROOTS = listOf(
+        "assets/songs/pack/",
+        "assets/img/",
+        "assets/char/",
+        "assets/music/",
+        "META-INF/",
+        "lib/",
+        "res/",
+        "kotlin/",
+    )
+
+    /** 非 `assets/songs/` 结构时允许的最大层级（兼容 `<标题>/<歌曲id>/资源文件`） */
+    private const val MAX_NESTING = 3
 
     /**
      * 单曲目录里允许出现的资源扩展名。
@@ -189,10 +216,13 @@ object ResourceZip {
             if (slash < 0 || rest.startsWith("pack/")) return null
             rest.substring(slash + 1)
         } else {
+            if (NON_SONG_ROOTS.any { name.startsWith(it) }) return null
             val parts = name.split('/').filter { it.isNotEmpty() }
-            when (parts.size) {
-                1 -> parts[0]   // 根目录直接放文件
-                2 -> parts[1]   // <歌曲目录>/文件
+            when {
+                parts.isEmpty() -> return null
+                // 根目录直接放文件 / `<歌曲id>/文件` / `<标题>/<歌曲id>/文件` 三种都取最深层文件名。
+                // 后者是社区常见打包方式（如 Lost Requiem.zip），旧实现会整包丢弃。
+                parts.size <= MAX_NESTING -> parts.last()
                 else -> return null // 层级过深，忽略（避免误吞嵌套目录）
             }
         }

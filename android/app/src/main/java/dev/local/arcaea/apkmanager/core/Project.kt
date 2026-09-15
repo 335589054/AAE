@@ -290,6 +290,10 @@ class ApkProject(val apkFile: File) : Closeable {
         for ((name, file) in bundle.files) {
             stageWriteFile(prefix + name, file)
         }
+        // 不属于歌曲目录、需写到 APK 其它位置的资源（如背景图 assets/img/bg/1080/…）
+        for ((path, file) in bundle.extras) {
+            stageWriteFile(path, file)
+        }
     }
 
     /**

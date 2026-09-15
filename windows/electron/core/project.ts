@@ -743,6 +743,10 @@ export function createSongWithResources(project: ApkProject, input: CreateSongIn
     for (const file of zipContent.files) {
       project.stageWrite(`${SONGS_ROOT}${id}/${file.rel}`, { kind: 'buffer', data: file.data });
     }
+    // 不属于歌曲目录的资源（如背景图 assets/img/bg/1080/…）按完整 APK 相对路径写入
+    for (const extra of zipContent.extras) {
+      project.stageWrite(extra.relPath, { kind: 'buffer', data: extra.data });
+    }
   }
   return song;
 }

@@ -23,10 +23,50 @@ class ResourceZipTest {
         assertEquals("base.ogg", ResourceZip.normalizeEntryName("assets\\songs\\mysong\\base.ogg"))
     }
 
+    /** 社区常见的「标题目录 + 歌曲id目录」嵌套打包（如 Lost Requiem.zip），旧实现会整包丢弃 */
+    @Test
+    fun normalizesNestedTitleSongFolderLayout() {
+        assertEquals("3.aff", ResourceZip.normalizeEntryName("Lost Requiem/lostrequiem/3.aff"))
+        assertEquals("base.ogg", ResourceZip.normalizeEntryName("Lost Requiem/lostrequiem/base.ogg"))
+        assertEquals("1080_base.jpg", ResourceZip.normalizeEntryName("Lost Requiem/lostrequiem/1080_base.jpg"))
+        // 标题目录下的背景图：先按文件名收下，随后由 AppRepository 依 songlist 的 bg 字段归类到
+        // assets/img/bg/1080/
+        assertEquals("djmax_wagd.jpg", ResourceZip.normalizeEntryName("Lost Requiem/djmax_wagd.jpg"))
+        // 同目录里的非资源文件仍忽略
+        assertNull(ResourceZip.normalizeEntryName("Lost Requiem/P.S..txt"))
+    }
+
+    /** 用两个真实样本 zip 的条目清单验证兼容性 */
+    @Test
+    fun supportsBothCommonSampleLayouts() {
+        // zipsample/latentduality.zip：扁平结构 + songlist.json
+        assertEquals("4.aff", ResourceZip.normalizeEntryName("4.aff"))
+        assertEquals("base.ogg", ResourceZip.normalizeEntryName("base.ogg"))
+        assertEquals("base.jpg", ResourceZip.normalizeEntryName("base.jpg"))
+        assertEquals("base_256.jpg", ResourceZip.normalizeEntryName("base_256.jpg"))
+        assertNull(ResourceZip.normalizeEntryName("songlist.json")) // 由调用方作为元数据处理
+        assertTrue(ResourceZip.isMetadataName("songlist.json"))
+
+        // zipsample/Lost Requiem.zip：标题目录 + 歌曲id目录
+        assertNull(ResourceZip.normalizeEntryName("Lost Requiem/")) // 目录条目
+        assertNull(ResourceZip.normalizeEntryName("Lost Requiem/songlist"))
+        assertEquals("3.aff", ResourceZip.normalizeEntryName("Lost Requiem/lostrequiem/3.aff"))
+        assertEquals("base.ogg", ResourceZip.normalizeEntryName("Lost Requiem/lostrequiem/base.ogg"))
+        assertEquals("1080_base.jpg", ResourceZip.normalizeEntryName("Lost Requiem/lostrequiem/1080_base.jpg"))
+        assertEquals(
+            "1080_base_256.jpg",
+            ResourceZip.normalizeEntryName("Lost Requiem/lostrequiem/1080_base_256.jpg"),
+        )
+        assertEquals("djmax_wagd.jpg", ResourceZip.normalizeEntryName("Lost Requiem/djmax_wagd.jpg"))
+        assertNull(ResourceZip.normalizeEntryName("P.S..txt"))
+    }
+
     @Test
     fun ignoresSystemAndOutOfScopeEntries() {
         assertNull(ResourceZip.normalizeEntryName("__MACOSX/foo.txt"))
-        assertNull(ResourceZip.normalizeEntryName("a/b/c/2.aff"))
+        assertNull(ResourceZip.normalizeEntryName("a/b/c/d/2.aff")) // 层级过深
+        assertNull(ResourceZip.normalizeEntryName("assets/img/bg/1080/x.jpg")) // 非歌曲目录
+        assertNull(ResourceZip.normalizeEntryName("META-INF/CERT.RSA"))
         assertNull(ResourceZip.normalizeEntryName("assets/songs/pack/select_base.png"))
         assertNull(ResourceZip.normalizeEntryName("assets/songs/songlist"))
         assertNull(ResourceZip.normalizeEntryName("songlist"))
@@ -38,6 +78,8 @@ class ResourceZipTest {
     fun detectsMetadataFragments() {
         assertTrue(ResourceZip.isMetadataName("songlist"))
         assertTrue(ResourceZip.isMetadataName("songlist.txt"))
+        assertTrue(ResourceZip.isMetadataName("songlist.json")) // 如 latentduality.zip
+        assertTrue(ResourceZip.isMetadataName("latentduality/songlist.json"))
         assertTrue(ResourceZip.isMetadataName("slst"))
         assertTrue(ResourceZip.isMetadataName("assets/songs/abc/slst"))
         assertTrue(ResourceZip.isMetadataName("abc/song.json"))
@@ -58,7 +100,7 @@ class ResourceZipTest {
     fun rejectsUnsafeFileNamesAfterSplitting() {
         assertNull(ResourceZip.normalizeEntryName("X/.outside"))
         assertNull(ResourceZip.normalizeEntryName("assets/songs/abc/.outside"))
-        assertNull(ResourceZip.normalizeEntryName("a/b/c/2.aff"))
+        assertNull(ResourceZip.normalizeEntryName("a/b/c/d/2.aff")) // 层级过深
         assertNotNull(ResourceZip.normalizeEntryName("X/2.aff"))
         assertTrue(ResourceZip.isSafeFileName("2.aff"))
         assertTrue(ResourceZip.isSafeFileName("base_256.jpg"))
