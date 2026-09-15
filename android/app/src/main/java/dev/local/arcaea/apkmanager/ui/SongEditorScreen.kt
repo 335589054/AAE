@@ -289,11 +289,6 @@ fun SongEditorScreen(
         exportingZip = false
         if (uri != null) vm.reverseExportSong(uri, song.id)
     }
-    var showPractice by remember { mutableStateOf(false) }
-    var practiceMaxMs by remember(song.id, version) { mutableStateOf<Long?>(null) }
-    LaunchedEffect(showPractice, song.id) {
-        if (showPractice) practiceMaxMs = vm.loadChartMaxMs(song.id)
-    }
     var deletePath by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize()) {
@@ -568,21 +563,14 @@ fun SongEditorScreen(
                 ) {
                     Text("导入资源压缩包（带 songdata 会自动填充标题/难度）")
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            exportingZip = true
-                            exportZip.launch("${song.id}.zip")
-                        },
-                        enabled = !busy,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("导出单曲 zip") }
-                    OutlinedButton(
-                        onClick = { showPractice = true },
-                        enabled = !busy,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("生成练习谱") }
-                }
+                OutlinedButton(
+                    onClick = {
+                        exportingZip = true
+                        exportZip.launch("${song.id}.zip")
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("导出单曲 zip") }
                 Text(
                     text = "谱面用 <难度>.aff（如 2.aff），音频用 base.ogg / <难度>.ogg，封面用 base.jpg 与 base_256.jpg。",
                     style = MaterialTheme.typography.labelSmall,
@@ -665,23 +653,6 @@ fun SongEditorScreen(
                 onClose()
             },
             onDismiss = { confirmExit = false },
-        )
-    }
-
-    if (showPractice) {
-        PracticeDialog(
-            songId = song.id,
-            songTitle = song.title() ?: song.id,
-            validDifficulties = files.mapNotNull { name ->
-                name.substringBeforeLast('.').toIntOrNull()?.takeIf { name.endsWith(".aff") }
-            }.distinct().sorted(),
-            maxMs = practiceMaxMs ?: 0L,
-            busy = busy,
-            onDismiss = { showPractice = false },
-            onGenerate = { args ->
-                showPractice = false
-                vm.generatePractice(args)
-            },
         )
     }
 }

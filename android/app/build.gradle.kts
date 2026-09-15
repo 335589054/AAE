@@ -59,9 +59,6 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        // 内置静态 ffmpeg 以 jniLibs 形式打包：需要解压为实体文件到 nativeLibraryDir，
-        // 才能用 ProcessBuilder 执行（否则只包在 APK 里没有可执行实体）。
-        jniLibs.useLegacyPackaging = true
     }
 }
 
